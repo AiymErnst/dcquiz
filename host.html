@@ -18,11 +18,13 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="config.js"></script>
+<script src="grade.js"></script>
 <script>
 (function () {
   var cfg = window.QUIZ_CONFIG;
   var sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY, { auth: { persistSession: false } });
   var LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е'];
+  var G = window.QuizGrade;
   var STORE = 'quiz_host_v1';
 
   var $view = document.getElementById('view');
@@ -222,11 +224,17 @@
     }).join('') + '</div>';
   }
 
+  function imageHtml() {
+    var img = st.question && st.question.image;
+    return img ? '<img class="qimg" alt="" src="' + esc(img) + '">' : '';
+  }
+
   function renderQuestion() {
     var s = st;
     $view.innerHTML =
       '<div class="qwrap">' +
         '<div class="qrow"><h1 class="qtitle">' + esc(s.question.text) + '</h1><div class="clock" id="clock"></div></div>' +
+        imageHtml() +
         optionsHtml(false) +
         '<div class="actions"><button class="btn ghost" id="revealBtn">Показать ответ</button></div>' +
       '</div>';
@@ -240,6 +248,7 @@
     $view.innerHTML =
       '<div class="qwrap">' +
         '<h1 class="qtitle">' + esc(s.question.text) + '</h1>' +
+        imageHtml() +
         optionsHtml(true) +
         (noAns.length ? '<p class="muted" style="margin:0">Без ответа: ' + noAns.length +
           (showNames ? ' (' + noAns.map(function (p) { return esc(p.avatar + ' ' + p.name); }).join(', ') + ')' : '') + '</p>' : '') +
@@ -335,14 +344,17 @@
     var p = s.players, m = matrix(), qs = full.questions;
     function pod(i, cls) {
       if (!p[i]) return '<div></div>';
+      var g = G.points(p[i].correct_count, s.total);
       return '<div class="pod ' + cls + '"><div class="pav">' + esc(p[i].avatar) + '</div><div class="pl">' + (i + 1) + ' место</div><div class="nm">' + esc(p[i].name) + '</div>' +
-        '<div class="pt">' + p[i].correct_count + ' из ' + s.total + ' · ' + fmt(p[i].score) + '</div></div>';
+        '<div class="pt">' + p[i].correct_count + ' из ' + s.total + ' · ' + g + ' из 100</div></div>';
     }
-    var head = '<tr><th>#</th><th class="nm">Имя</th><th>Верных</th><th>%</th><th>Баллы</th>' +
+    var head = '<tr><th>#</th><th class="nm">Имя</th><th>Верных</th><th>Из 100</th><th>Буква</th><th>Оценка</th><th>Очки</th>' +
       qs.map(function (q) { return '<th title="' + esc(q.text) + '">' + q.idx + '</th>'; }).join('') + '</tr>';
     var body = p.map(function (pl, i) {
-      return '<tr><td>' + (i + 1) + '</td><td class="nm">' + esc(pl.avatar + ' ' + pl.name) + '</td><td><b>' + pl.correct_count + '</b></td>' +
-        '<td>' + Math.round(100 * pl.correct_count / s.total) + '</td><td>' + fmt(pl.score) + '</td>' +
+      var g = G.points(pl.correct_count, s.total);
+      return '<tr><td>' + (i + 1) + '</td><td class="nm">' + esc(pl.avatar + ' ' + pl.name) + '</td>' +
+        '<td>' + pl.correct_count + ' из ' + s.total + '</td><td><b>' + g + '</b></td><td>' + G.letter(g) + '</td>' +
+        '<td class="' + (G.mark(g) === 2 ? 'n' : '') + '"><b>' + G.mark(g) + '</b></td><td class="muted">' + fmt(pl.score) + '</td>' +
         qs.map(function (q) {
           var a = m[pl.id + ':' + q.idx];
           if (!a) return '<td class="e">·</td>';
@@ -350,7 +362,7 @@
             (a.is_correct ? '✓' : LETTERS[a.choice - 1]) + '</td>';
         }).join('') + '</tr>';
     }).join('');
-    var stat = '<tr class="qrow-stat"><td></td><td class="nm">% верных по вопросу</td><td></td><td></td><td></td>' +
+    var stat = '<tr class="qrow-stat"><td></td><td class="nm">% верных по вопросу</td><td></td><td></td><td></td><td></td><td></td>' +
       qs.map(function (q) {
         var ok = p.filter(function (pl) { var a = m[pl.id + ':' + q.idx]; return a && a.is_correct; }).length;
         return '<td>' + (p.length ? Math.round(100 * ok / p.length) : 0) + '</td>';
@@ -359,7 +371,7 @@
       '<div class="final">' +
         '<div class="podium">' + pod(1, 'p2') + pod(0, 'p1') + pod(2, 'p3') + '</div>' +
         '<div class="tablewrap"><table class="res">' + head + body + stat + '</table></div>' +
-        '<p class="muted" style="margin:0">✓ верно · буква = выбранный неверный вариант · точка = нет ответа. Наведи на ячейку, чтобы увидеть ответ.</p>' +
+        '<p class="muted" style="margin:0">Оценка считается по верным ответам. Очки квиза зависят от скорости и нужны только для рейтинга. ✓ верно · буква = выбранный неверный вариант · точка = нет ответа.</p>' +
         '<div class="actions"><button class="btn ghost" id="newBtn">Новая сессия</button><button class="btn" id="csvBtn">Скачать таблицу (CSV)</button></div>' +
       '</div>';
     document.getElementById('csvBtn').onclick = downloadCsv;
@@ -369,9 +381,10 @@
   function downloadCsv() {
     var s = st, m = matrix(), qs = full.questions;
     function cell(v) { v = String(v == null ? '' : v); return /[";\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
-    var rows = [['Место', 'Имя', 'Верных', 'Из', '%', 'Баллы'].concat(qs.map(function (q) { return 'В' + q.idx; }))];
+    var rows = [['Место', 'Имя', 'Верных', 'Из', 'Баллы из 100', 'Буква', 'Оценка', 'Очки квиза'].concat(qs.map(function (q) { return 'В' + q.idx; }))];
     s.players.forEach(function (pl, i) {
-      rows.push([i + 1, pl.name, pl.correct_count, s.total, Math.round(100 * pl.correct_count / s.total), pl.score].concat(qs.map(function (q) {
+      var g = G.points(pl.correct_count, s.total);
+      rows.push([i + 1, pl.name, pl.correct_count, s.total, g, G.letter(g), G.mark(g), pl.score].concat(qs.map(function (q) {
         var a = m[pl.id + ':' + q.idx];
         return a ? (a.is_correct ? '1' : '0 (' + LETTERS[a.choice - 1] + ')') : '';
       })));

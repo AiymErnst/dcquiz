@@ -72,6 +72,7 @@ label.lbl { display: block; font-size: 13px; font-weight: 600; color: var(--mute
 .opt:active { transform: scale(.98); }
 .opt.dim { opacity: .25; }
 .opt.picked { box-shadow: 0 0 0 3px var(--bg), 0 0 0 6px var(--c); }
+.phone .qimg { display: block; width: 100%; max-height: 220px; object-fit: contain; border-radius: 12px; background: var(--card); margin-bottom: 4px; }
 .timerbar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
 .timerbar > i { display: block; height: 100%; background: var(--ink); width: 100%; transition: width .25s linear; }
 .big-status { font-size: 34px; font-weight: 800; letter-spacing: -.02em; }
@@ -122,6 +123,7 @@ label.lbl { display: block; font-size: 13px; font-weight: 600; color: var(--mute
 .qrow .qtitle { flex: 1; }
 .clock { flex: none; width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; font-size: 42px; font-weight: 800; background: var(--card); }
 .clock.low { color: var(--bad); }
+.qwrap .qimg { display: block; max-width: 100%; max-height: 36vh; margin: 0 auto; object-fit: contain; border-radius: var(--radius); }
 .hopts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .hopt {
   position: relative; overflow: hidden;

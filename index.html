@@ -17,6 +17,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="config.js"></script>
+<script src="grade.js"></script>
 <script>
 (function () {
   var cfg = window.QUIZ_CONFIG;
@@ -145,20 +146,26 @@
       renderReveal();
     } else if (s.phase === 'finished') {
       $right.textContent = '';
+      var G = window.QuizGrade, g = G.points(s.correct_count, s.total);
       $view.innerHTML =
         '<h1>Квиз завершён</h1>' +
         '<div class="stat-row">' +
-          '<div class="stat"><b>' + s.rank + '</b><span>место из ' + s.players + '</span></div>' +
-          '<div class="stat"><b>' + s.correct_count + ' / ' + s.total + '</b><span>верных ответов</span></div>' +
+          '<div class="stat"><b>' + s.correct_count + ' из ' + s.total + '</b><span>верных ответов</span></div>' +
+          '<div class="stat"><b>' + g + ' из 100</b><span>баллов · ' + G.letter(g) + ' · оценка ' + G.mark(g) + '</span></div>' +
         '</div>' +
-        '<div class="stat"><b>' + fmt(s.score) + '</b><span>баллов</span></div>';
+        '<div class="stat-row">' +
+          '<div class="stat"><b>' + s.rank + '</b><span>место из ' + s.players + '</span></div>' +
+          '<div class="stat"><b>' + fmt(s.score) + '</b><span>очков квиза</span></div>' +
+        '</div>';
     }
   }
 
   function renderQuestion(answered) {
     var s = state, q = s.question, chosen = s.my_choice != null ? s.my_choice : pending;
     var html = '<div class="timerbar"><i id="bar"></i></div>' +
-      '<div class="qtext">' + esc(q.text) + '</div><div class="opts">';
+      '<div class="qtext">' + esc(q.text) + '</div>' +
+      (q.image ? '<img class="qimg" alt="" src="' + esc(q.image) + '">' : '') +
+      '<div class="opts">';
     q.options.forEach(function (o, i) {
       var cls = 'opt c' + (i % 4 + 1);
       if (answered) cls += (chosen === i + 1 ? ' picked' : ' dim');
@@ -200,7 +207,7 @@
     }
     html += '<div class="stat-row">' +
       '<div class="stat"><b>' + s.rank + '</b><span>место из ' + s.players + '</span></div>' +
-      '<div class="stat"><b>' + fmt(s.score) + '</b><span>баллов</span></div></div>';
+      '<div class="stat"><b>' + fmt(s.score) + '</b><span>очков</span></div></div>';
     $view.innerHTML = html;
   }
 
