@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Квиз · ведущий</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="stage">
+  <div class="topbar" id="topbar"></div>
+  <div id="view" style="flex:1;display:flex;flex-direction:column"></div>
+</div>
+<div class="overlay hidden" id="overlay"></div>
+<div class="net hidden" id="net">Нет связи, переподключаюсь…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script>
+(function () {
+  var cfg = window.QUIZ_CONFIG;
+  var sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY, { auth: { persistSession: false } });
+  var LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е'];
+  var STORE = 'quiz_host_v1';
+
+  var $view = document.getElementById('view');
+  var $top = document.getElementById('topbar');
+  var $overlay = document.getElementById('overlay');
+  var $net = document.getElementById('net');
+
+  var host = load();     // {session_id, host_token, code}
+  var st = null;         // последнее состояние с сервера
+  var full = null;       // полные данные для итоговой таблицы
+  var viewKey = '';
+  var deadline = 0;
+  var busy = false;
+  var showNames = false;
+  var pollTimer = null;
+  var gen = 0;           // меняется при выходе к экрану входа, чтобы старые ответы сервера не перерисовали экран
+
+  function load() { try { return JSON.parse(localStorage.getItem(STORE)); } catch (e) { return null; } }
+  function save(v) { try { v ? localStorage.setItem(STORE, JSON.stringify(v)) : localStorage.removeItem(STORE); } catch (e) {} }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function fmt(n) { return Number(n || 0).toLocaleString('ru-RU'); }
+  function rpc(fn, args) { return sb.rpc(fn, args).then(function (r) { if (r.error) throw r.error; return r.data; }); }
+  function joinUrl() { return new URL('./', location.href).href.replace(/\/$/, ''); }
+
+  // ---------- вход ведущего ----------
+  function showLogin(msg) {
+    clearTimeout(pollTimer);
+    gen++;
+    st = null; full = null;
+    viewKey = 'login';
+    $top.innerHTML = '';
+    var resume = host ? '<button class="btn ghost" id="resume">Вернуться к сессии ' + esc(host.code) + '</button>' : '';
+    $view.innerHTML =
+      '<div class="login">' +
+        '<h1>Новый квиз</h1>' +
+        '<div><label class="lbl" for="pw">Пароль ведущего</label><input class="field" id="pw" type="password" autocomplete="current-password"></div>' +
+        '<div id="quizPick" class="hidden"><label class="lbl" for="quiz">Квиз</label><select class="field" id="quiz"></select></div>' +
+        '<button class="btn" id="go">Далее</button>' + resume +
+        '<div class="err" id="err">' + esc(msg || '') + '</div>' +
+      '</div>';
+    var $pw = document.getElementById('pw'), $go = document.getElementById('go'), $err = document.getElementById('err');
+    var step = 1;
+    $pw.focus();
+    $pw.onkeydown = function (e) { if (e.key === 'Enter') $go.click(); };
+    if (host) document.getElementById('resume').onclick = function () { viewKey = ''; poll(); };
+    $go.onclick = function () {
+      $err.textContent = ''; $go.disabled = true;
+      if (step === 1) {
+        rpc('quiz_host_quizzes', { p_password: $pw.value }).then(function (list) {
+          $go.disabled = false;
+          if (!list.length) { $err.textContent = 'В базе нет вопросов. Запусти SQL с вопросами'; return; }
+          document.getElementById('quiz').innerHTML = list.map(function (q) {
+            return '<option value="' + esc(q.quiz_id) + '">' + esc(q.quiz_id) + ' · ' + q.count + ' вопр.</option>';
+          }).join('');
+          document.getElementById('quizPick').classList.remove('hidden');
+          $go.textContent = 'Создать сессию';
+          step = 2;
+        }).catch(function (e) {
+          $go.disabled = false;
+          $err.textContent = (e.message || '').indexOf('WRONG_PASSWORD') !== -1 ? 'Неверный пароль' : 'Ошибка подключения к базе';
+        });
+      } else {
+        rpc('quiz_host_create', { p_password: $pw.value, p_quiz_id: document.getElementById('quiz').value })
+          .then(function (d) { host = d; save(d); full = null; poll(); })
+          .catch(function () { $go.disabled = false; $err.textContent = 'Не удалось создать сессию'; });
+      }
+    };
+  }
+
+  // ---------- опрос ----------
+  function poll() {
+    clearTimeout(pollTimer);
+    var my = gen;
+    var wantFull = st && st.phase === 'finished' && !full;
+    rpc('quiz_host_state', { p_session: host.session_id, p_token: host.host_token, p_full: !!wantFull })
+      .then(function (s) {
+        if (my !== gen) return;
+        $net.classList.add('hidden');
+        st = s;
+        if (s.questions) full = s;
+        if (s.phase === 'question') deadline = performance.now() + s.remaining_ms;
+        render();
+        autoReveal();
+        var next = s.phase === 'finished' && !full ? 0 : (s.phase === 'finished' ? 5000 : 1000);
+        pollTimer = setTimeout(poll, next);
+      })
+      .catch(function (e) {
+        if (my !== gen) return;
+        if ((e.message || '').indexOf('NOT_HOST') !== -1) { host = null; save(null); return showLogin('Сессия не найдена'); }
+        $net.classList.remove('hidden');
+        pollTimer = setTimeout(poll, 2000);
+      });
+  }
+
+  function setPhase(phase, q) {
+    if (busy) return;
+    busy = true;
+    rpc('quiz_host_set', { p_session: host.session_id, p_token: host.host_token, p_phase: phase, p_q: q == null ? null : q })
+      .then(function () { busy = false; showNames = false; poll(); })
+      .catch(function () { busy = false; });
+  }
+
+  function autoReveal() {
+    if (!st || st.phase !== 'question' || busy) return;
+    var all = st.players.length > 0 && st.players.every(function (p) { return p.answered; });
+    if (all || deadline - performance.now() <= 0) setPhase('reveal');
+  }
+
+  // ---------- отрисовка ----------
+  function render() {
+    var s = st;
+    var answeredN = s.players.filter(function (p) { return p.answered; }).length;
+    $top.innerHTML =
+      '<span class="pill">Код <b>' + esc(s.code) + '</b></span>' +
+      (s.q > 0 && s.phase !== 'finished' ? '<span class="pill">Вопрос <b>' + s.q + ' / ' + s.total + '</b></span>' : '') +
+      '<span class="sp"></span>' +
+      (s.phase === 'question' ? '<span class="pill">Ответили <b id="ansN">' + answeredN + ' / ' + s.players.length + '</b></span>' : '') +
+      '<span class="pill">Участников <b>' + s.players.length + '</b></span>' +
+      (s.phase !== 'lobby' && s.phase !== 'finished' ? '<button class="btn ghost small" id="boardBtn">Весь рейтинг</button>' : '');
+    var b = document.getElementById('boardBtn');
+    if (b) b.onclick = showBoard;
+
+    var key = s.phase + ':' + s.q + ':' + (showNames ? 'n' : '') + ':' + (full ? 'f' : '');
+    // в лобби и во время вопроса обновляем экран при каждом опросе (новые участники, счётчики)
+    if (key === viewKey && s.phase !== 'lobby') return;
+    viewKey = key;
+
+    if (s.phase === 'lobby') renderLobby();
+    else if (s.phase === 'question') renderQuestion();
+    else if (s.phase === 'reveal') renderReveal();
+    else if (s.phase === 'finished') renderFinal();
+  }
+
+  function renderLobby() {
+    var s = st, url = joinUrl();
+    var qr = 'https://api.qrserver.com/v1/create-qr-code/?size=520x520&margin=0&data=' + encodeURIComponent(url + '/?code=' + s.code);
+    var people = s.players.length
+      ? s.players.map(function (p) { return '<button class="chip" data-id="' + p.id + '" title="Нажми, чтобы удалить">' + esc(p.name) + '</button>'; }).join('')
+      : '<span class="muted">Пока никого</span>';
+    if (!document.getElementById('lobbyRoot')) {
+      $view.innerHTML =
+        '<div class="lobby" id="lobbyRoot">' +
+          '<div class="joinbox">' +
+            '<div class="url">Зайди на <b>' + esc(url.replace(/^https?:\/\//, '')) + '</b> и введи код</div>' +
+            '<div class="code">' + esc(s.code) + '</div>' +
+            '<img alt="QR-код для входа" src="' + qr + '">' +
+          '</div>' +
+          '<div class="people"><h2 id="pplH"></h2><div class="chips" id="ppl"></div></div>' +
+        '</div>' +
+        '<div class="actions"><button class="btn ghost" id="newBtn">Новая сессия</button><button class="btn" id="startBtn">Начать квиз</button></div>';
+      document.getElementById('startBtn').onclick = function () { setPhase('question', 1); };
+      document.getElementById('newBtn').onclick = function () { showLogin(); };
+    }
+    document.getElementById('pplH').textContent = 'Подключились: ' + s.players.length;
+    document.getElementById('ppl').innerHTML = people;
+    document.getElementById('startBtn').disabled = s.players.length === 0;
+    Array.prototype.forEach.call(document.querySelectorAll('#ppl .chip'), function (c) {
+      c.onclick = function () {
+        rpc('quiz_host_kick', { p_session: host.session_id, p_token: host.host_token, p_player: c.getAttribute('data-id') }).then(poll);
+      };
+    });
+  }
+
+  function optionsHtml(reveal) {
+    var s = st, q = s.question, total = s.answers.length;
+    var counts = q.options.map(function () { return 0; });
+    var names = q.options.map(function () { return []; });
+    s.answers.forEach(function (a) { counts[a.choice - 1]++; names[a.choice - 1].push(a.name); });
+    return '<div class="hopts">' + q.options.map(function (o, i) {
+      var cls = 'hopt c' + (i % 4 + 1);
+      var extra = '';
+      if (reveal) {
+        cls += (i + 1 === q.correct) ? ' right' : ' dim';
+        var pct = total ? Math.round(100 * counts[i] / total) : 0;
+        extra = '<span class="fill" style="width:' + pct + '%"></span>';
+      }
+      return '<div class="' + cls + '">' + extra +
+        '<span class="letter" style="position:relative">' + (reveal && i + 1 === q.correct ? '✓' : LETTERS[i]) + '</span>' +
+        '<span class="txt">' + esc(o) +
+          (reveal && showNames && names[i].length ? '<div class="names">' + names[i].map(esc).join(', ') + '</div>' : '') +
+        '</span>' +
+        (reveal ? '<span class="cnt">' + counts[i] + '</span>' : '') +
+      '</div>';
+    }).join('') + '</div>';
+  }
+
+  function renderQuestion() {
+    var s = st;
+    $view.innerHTML =
+      '<div class="qwrap">' +
+        '<div class="qrow"><h1 class="qtitle">' + esc(s.question.text) + '</h1><div class="clock" id="clock"></div></div>' +
+        optionsHtml(false) +
+        '<div class="actions"><button class="btn ghost" id="revealBtn">Показать ответ</button></div>' +
+      '</div>';
+    document.getElementById('revealBtn').onclick = function () { setPhase('reveal'); };
+    tick();
+  }
+
+  function renderReveal() {
+    var s = st, last = s.q >= s.total;
+    var top = s.players.slice(0, 5).map(function (p, i) {
+      return '<li><span class="n">' + (i + 1) + '</span><span class="nm">' + esc(p.name) + '</span><span class="pt">' + fmt(p.score) + '</span></li>';
+    }).join('');
+    var noAns = s.players.length - s.answers.length;
+    $view.innerHTML =
+      '<div class="qwrap">' +
+        '<h1 class="qtitle">' + esc(s.question.text) + '</h1>' +
+        '<div class="reveal-grid">' +
+          '<div>' + optionsHtml(true) +
+            (noAns > 0 ? '<p class="muted">Без ответа: ' + noAns + (showNames ? ' (' + s.players.filter(function (p) { return !p.answered; }).map(function (p) { return esc(p.name); }).join(', ') + ')' : '') + '</p>' : '') +
+          '</div>' +
+          '<div class="board"><h3>Промежуточный рейтинг</h3><ol>' + (top || '<li class="muted">Нет участников</li>') + '</ol></div>' +
+        '</div>' +
+        '<div class="actions">' +
+          '<button class="btn ghost" id="namesBtn">' + (showNames ? 'Скрыть имена' : 'Кто как ответил') + '</button>' +
+          '<button class="btn" id="nextBtn">' + (last ? 'Итоги →' : 'Следующий вопрос →') + '</button>' +
+        '</div>' +
+      '</div>';
+    document.getElementById('namesBtn').onclick = function () { showNames = !showNames; render(); };
+    document.getElementById('nextBtn').onclick = function () { last ? setPhase('finished') : setPhase('question', s.q + 1); };
+  }
+
+  function showBoard() {
+    var rows = st.players.map(function (p, i) {
+      return '<li><span class="n">' + (i + 1) + '</span><span class="nm">' + esc(p.name) + '</span>' +
+        '<span class="muted">' + p.correct_count + ' верн.</span><span class="pt" style="min-width:70px;text-align:right">' + fmt(p.score) + '</span></li>';
+    }).join('');
+    $overlay.innerHTML = '<div class="board"><h3>Рейтинг' + (st.phase === 'question' ? ' (без текущего вопроса)' : '') + '</h3><ol>' + rows + '</ol>' +
+      '<div class="actions" style="margin-top:14px"><button class="btn small" id="closeOv">Закрыть</button></div></div>';
+    $overlay.classList.remove('hidden');
+    document.getElementById('closeOv').onclick = function () { $overlay.classList.add('hidden'); };
+    $overlay.onclick = function (e) { if (e.target === $overlay) $overlay.classList.add('hidden'); };
+  }
+
+  // таблица: кто как ответил на каждый вопрос
+  function matrix() {
+    var map = {};
+    (full.all_answers || []).forEach(function (a) { map[a.player_id + ':' + a.q] = a; });
+    return map;
+  }
+
+  function renderFinal() {
+    var s = st;
+    if (!full) { $view.innerHTML = '<p class="muted">Считаю итоги…</p>'; return; }
+    var p = s.players, m = matrix(), qs = full.questions;
+    function pod(i, cls) {
+      if (!p[i]) return '<div></div>';
+      return '<div class="pod ' + cls + '"><div class="pl">' + (i + 1) + ' место</div><div class="nm">' + esc(p[i].name) + '</div>' +
+        '<div class="pt">' + p[i].correct_count + ' из ' + s.total + ' · ' + fmt(p[i].score) + '</div></div>';
+    }
+    var head = '<tr><th>#</th><th class="nm">Имя</th><th>Верных</th><th>%</th><th>Баллы</th>' +
+      qs.map(function (q) { return '<th title="' + esc(q.text) + '">' + q.idx + '</th>'; }).join('') + '</tr>';
+    var body = p.map(function (pl, i) {
+      return '<tr><td>' + (i + 1) + '</td><td class="nm">' + esc(pl.name) + '</td><td><b>' + pl.correct_count + '</b></td>' +
+        '<td>' + Math.round(100 * pl.correct_count / s.total) + '</td><td>' + fmt(pl.score) + '</td>' +
+        qs.map(function (q) {
+          var a = m[pl.id + ':' + q.idx];
+          if (!a) return '<td class="e">·</td>';
+          return '<td class="' + (a.is_correct ? 'y' : 'n') + '" title="' + esc(LETTERS[a.choice - 1] + '. ' + q.options[a.choice - 1]) + '">' +
+            (a.is_correct ? '✓' : LETTERS[a.choice - 1]) + '</td>';
+        }).join('') + '</tr>';
+    }).join('');
+    var stat = '<tr class="qrow-stat"><td></td><td class="nm">% верных по вопросу</td><td></td><td></td><td></td>' +
+      qs.map(function (q) {
+        var ok = p.filter(function (pl) { var a = m[pl.id + ':' + q.idx]; return a && a.is_correct; }).length;
+        return '<td>' + (p.length ? Math.round(100 * ok / p.length) : 0) + '</td>';
+      }).join('') + '</tr>';
+    $view.innerHTML =
+      '<div class="final">' +
+        '<div class="podium">' + pod(1, 'p2') + pod(0, 'p1') + pod(2, 'p3') + '</div>' +
+        '<div class="tablewrap"><table class="res">' + head + body + stat + '</table></div>' +
+        '<p class="muted" style="margin:0">✓ верно · буква = выбранный неверный вариант · точка = нет ответа. Наведи на ячейку, чтобы увидеть ответ.</p>' +
+        '<div class="actions"><button class="btn ghost" id="newBtn">Новая сессия</button><button class="btn" id="csvBtn">Скачать таблицу (CSV)</button></div>' +
+      '</div>';
+    document.getElementById('csvBtn').onclick = downloadCsv;
+    document.getElementById('newBtn').onclick = function () { showLogin(); };
+  }
+
+  function downloadCsv() {
+    var s = st, m = matrix(), qs = full.questions;
+    function cell(v) { v = String(v == null ? '' : v); return /[";\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+    var rows = [['Место', 'Имя', 'Верных', 'Из', '%', 'Баллы'].concat(qs.map(function (q) { return 'В' + q.idx; }))];
+    s.players.forEach(function (pl, i) {
+      rows.push([i + 1, pl.name, pl.correct_count, s.total, Math.round(100 * pl.correct_count / s.total), pl.score].concat(qs.map(function (q) {
+        var a = m[pl.id + ':' + q.idx];
+        return a ? (a.is_correct ? '1' : '0 (' + LETTERS[a.choice - 1] + ')') : '';
+      })));
+    });
+    var csv = '﻿' + rows.map(function (r) { return r.map(cell).join(';'); }).join('\r\n');
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'quiz-' + s.quiz_id + '-' + s.code + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  function tick() {
+    if (!st || st.phase !== 'question') return;
+    var left = Math.max(0, deadline - performance.now());
+    var c = document.getElementById('clock');
+    if (c) { c.textContent = Math.ceil(left / 1000); c.classList.toggle('low', left < 5500); }
+    if (left <= 0) autoReveal();
+  }
+  setInterval(tick, 200);
+
+  // пробел / Enter = главная кнопка
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.key !== ' ' && e.key !== 'Enter') return;
+    var btn = document.getElementById('nextBtn') || document.getElementById('revealBtn') || document.getElementById('startBtn');
+    if (btn && !btn.disabled) { e.preventDefault(); btn.click(); }
+  });
+
+  host ? poll() : showLogin();
+})();
+</script>
+</body>
+</html>

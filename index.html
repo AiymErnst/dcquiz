@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Квиз</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="phone">
+  <header><span id="hdrLeft"></span><span id="hdrRight"></span></header>
+  <div class="center" id="view"></div>
+</div>
+<div class="net hidden" id="net">Нет связи, переподключаюсь…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script>
+(function () {
+  var cfg = window.QUIZ_CONFIG;
+  var sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY, { auth: { persistSession: false } });
+  var LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е'];
+  var STORE = 'quiz_player_v1';
+  var ERR = {
+    NO_SESSION: 'Квиз с таким кодом не найден',
+    NAME_TAKEN: 'Это имя уже занято. Добавь фамилию',
+    BAD_NAME: 'Имя должно быть от 2 до 40 символов',
+    FINISHED: 'Этот квиз уже закончился',
+    TIME_UP: 'Время вышло',
+    CLOSED: 'Приём ответов закрыт'
+  };
+
+  var $view = document.getElementById('view');
+  var $left = document.getElementById('hdrLeft');
+  var $right = document.getElementById('hdrRight');
+  var $net = document.getElementById('net');
+
+  var me = load();
+  var state = null;
+  var viewKey = '';
+  var deadline = 0;
+  var limitMs = 1;
+  var pending = null; // выбранный вариант, пока сервер не подтвердил
+  var pollTimer = null;
+
+  function load() { try { return JSON.parse(localStorage.getItem(STORE)); } catch (e) { return null; } }
+  function save(v) { try { v ? localStorage.setItem(STORE, JSON.stringify(v)) : localStorage.removeItem(STORE); } catch (e) {} }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function errText(e) {
+    var m = (e && e.message) || '';
+    for (var k in ERR) if (m.indexOf(k) !== -1) return ERR[k];
+    return 'Что-то пошло не так. Попробуй ещё раз';
+  }
+  function fmt(n) { return Number(n || 0).toLocaleString('ru-RU'); }
+  function rpc(fn, args) {
+    return sb.rpc(fn, args).then(function (r) { if (r.error) throw r.error; return r.data; });
+  }
+
+  // ---------- вход ----------
+  function showJoin(msg) {
+    viewKey = 'join';
+    $left.textContent = ''; $right.textContent = '';
+    var code = new URLSearchParams(location.search).get('code') || '';
+    $view.innerHTML =
+      '<h1>Подключиться к квизу</h1>' +
+      '<div><label class="lbl" for="code">Код</label>' +
+      '<input class="field" id="code" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="123456" value="' + esc(code) + '"></div>' +
+      '<div><label class="lbl" for="name">Имя и фамилия</label>' +
+      '<input class="field" id="name" autocomplete="name" maxlength="40" placeholder="Айгерим Сапарова"></div>' +
+      '<button class="btn" id="go">Войти</button>' +
+      '<div class="err" id="err">' + esc(msg || '') + '</div>';
+    var $code = document.getElementById('code'), $name = document.getElementById('name'), $go = document.getElementById('go');
+    (code ? $name : $code).focus();
+    function submit() {
+      $go.disabled = true;
+      document.getElementById('err').textContent = '';
+      rpc('quiz_join', { p_code: $code.value.replace(/\D/g, ''), p_name: $name.value })
+        .then(function (d) { me = d; save(d); poll(); })
+        .catch(function (e) { $go.disabled = false; document.getElementById('err').textContent = errText(e); });
+    }
+    $go.onclick = submit;
+    $name.onkeydown = $code.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
+  }
+
+  // ---------- опрос сервера ----------
+  function poll() {
+    clearTimeout(pollTimer);
+    if (!me) return showJoin();
+    rpc('quiz_player_state', { p_player: me.player_id, p_token: me.token })
+      .then(function (s) {
+        $net.classList.add('hidden');
+        state = s;
+        if (s.phase === 'question') {
+          deadline = performance.now() + s.remaining_ms;
+          limitMs = s.question.time_limit * 1000;
+        }
+        render();
+        pollTimer = setTimeout(poll, s.phase === 'finished' ? 5000 : 1000);
+      })
+      .catch(function (e) {
+        if ((e.message || '').indexOf('NOT_PLAYER') !== -1) {
+          me = null; save(null);
+          return showJoin('Тебя нет в этом квизе. Подключись заново');
+        }
+        $net.classList.remove('hidden');
+        pollTimer = setTimeout(poll, 2000);
+      });
+  }
+
+  // ---------- экраны ----------
+  function render() {
+    var s = state;
+    $left.textContent = s.name;
+    $right.textContent = s.q > 0 ? 'Вопрос ' + s.q + ' / ' + s.total : '';
+    var answered = s.my_choice != null || pending != null;
+    var key = s.phase + ':' + s.q + ':' + (answered ? 'a' : '-');
+    if (key === viewKey) return;
+    viewKey = key;
+    if (s.phase !== 'question') pending = null;
+
+    if (s.phase === 'lobby') {
+      $view.innerHTML =
+        '<div class="pulse"></div>' +
+        '<h1>Ты в игре</h1>' +
+        '<p class="muted">Смотри на экран. Квиз скоро начнётся</p>';
+    } else if (s.phase === 'question') {
+      renderQuestion(answered);
+    } else if (s.phase === 'reveal') {
+      renderReveal();
+    } else if (s.phase === 'finished') {
+      $right.textContent = '';
+      $view.innerHTML =
+        '<h1>Квиз завершён</h1>' +
+        '<div class="stat-row">' +
+          '<div class="stat"><b>' + s.rank + '</b><span>место из ' + s.players + '</span></div>' +
+          '<div class="stat"><b>' + s.correct_count + ' / ' + s.total + '</b><span>верных ответов</span></div>' +
+        '</div>' +
+        '<div class="stat"><b>' + fmt(s.score) + '</b><span>баллов</span></div>';
+    }
+  }
+
+  function renderQuestion(answered) {
+    var s = state, q = s.question, chosen = s.my_choice != null ? s.my_choice : pending;
+    var html = '<div class="timerbar"><i id="bar"></i></div>' +
+      '<div class="qtext">' + esc(q.text) + '</div><div class="opts">';
+    q.options.forEach(function (o, i) {
+      var cls = 'opt c' + (i % 4 + 1);
+      if (answered) cls += (chosen === i + 1 ? ' picked' : ' dim');
+      html += '<button class="' + cls + '" data-i="' + (i + 1) + '"' + (answered ? ' disabled' : '') + '>' +
+        '<span class="letter">' + LETTERS[i] + '</span><span>' + esc(o) + '</span></button>';
+    });
+    html += '</div><p class="muted" id="qmsg">' + (answered ? 'Ответ принят. Ждём остальных' : '') + '</p>';
+    $view.innerHTML = html;
+    if (!answered) {
+      Array.prototype.forEach.call($view.querySelectorAll('.opt'), function (b) {
+        b.onclick = function () { choose(Number(b.getAttribute('data-i'))); };
+      });
+    }
+    tick();
+  }
+
+  function choose(i) {
+    if (pending != null) return;
+    pending = i;
+    render();
+    rpc('quiz_answer', { p_player: me.player_id, p_token: me.token, p_choice: i })
+      .catch(function (e) {
+        if ((e.message || '').indexOf('ALREADY') !== -1) return;
+        pending = null; viewKey = '';
+        render();
+        var m = document.getElementById('qmsg');
+        if (m) m.textContent = errText(e);
+      });
+  }
+
+  function renderReveal() {
+    var s = state, q = s.question, html;
+    if (s.my_choice == null) html = '<div class="big-status">Нет ответа</div>';
+    else if (s.my_correct) html = '<div class="big-status ok">Верно! +' + fmt(s.my_points) + '</div>';
+    else html = '<div class="big-status bad">Неверно</div>';
+    if (!s.my_correct) {
+      html += '<div class="answer-card"><span class="muted">Правильный ответ</span><br><b>' +
+        LETTERS[s.correct - 1] + '. ' + esc(q.options[s.correct - 1]) + '</b></div>';
+    }
+    html += '<div class="stat-row">' +
+      '<div class="stat"><b>' + s.rank + '</b><span>место из ' + s.players + '</span></div>' +
+      '<div class="stat"><b>' + fmt(s.score) + '</b><span>баллов</span></div></div>';
+    $view.innerHTML = html;
+  }
+
+  function tick() {
+    var bar = document.getElementById('bar');
+    if (bar && state && state.phase === 'question') {
+      var left = Math.max(0, deadline - performance.now());
+      bar.style.width = (100 * left / limitMs) + '%';
+    }
+  }
+  setInterval(tick, 250);
+
+  // старт
+  var urlCode = new URLSearchParams(location.search).get('code');
+  if (me && urlCode && urlCode !== me.code) { me = null; save(null); }
+  me ? poll() : showJoin();
+})();
+</script>
+</body>
+</html>
