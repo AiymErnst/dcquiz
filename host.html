@@ -37,6 +37,8 @@
   var deadline = 0;
   var busy = false;
   var showNames = false;
+  var boardShown = false; // после ответа: экран рейтинга
+  var ROW_H = 64, BOARD_MAX = 10;
   var pollTimer = null;
   var gen = 0;           // меняется при выходе к экрану входа, чтобы старые ответы сервера не перерисовали экран
 
@@ -121,7 +123,7 @@
     if (busy) return;
     busy = true;
     rpc('quiz_host_set', { p_session: host.session_id, p_token: host.host_token, p_phase: phase, p_q: q == null ? null : q })
-      .then(function () { busy = false; showNames = false; poll(); })
+      .then(function () { busy = false; showNames = false; boardShown = false; poll(); })
       .catch(function () { busy = false; });
   }
 
@@ -145,23 +147,20 @@
     var b = document.getElementById('boardBtn');
     if (b) b.onclick = showBoard;
 
-    var key = s.phase + ':' + s.q + ':' + (showNames ? 'n' : '') + ':' + (full ? 'f' : '');
+    var key = s.phase + ':' + s.q + ':' + (showNames ? 'n' : '') + ':' + (boardShown ? 'b' : '') + ':' + (full ? 'f' : '');
     // в лобби и во время вопроса обновляем экран при каждом опросе (новые участники, счётчики)
     if (key === viewKey && s.phase !== 'lobby') return;
     viewKey = key;
 
     if (s.phase === 'lobby') renderLobby();
     else if (s.phase === 'question') renderQuestion();
-    else if (s.phase === 'reveal') renderReveal();
+    else if (s.phase === 'reveal') boardShown ? renderBoard() : renderReveal();
     else if (s.phase === 'finished') renderFinal();
   }
 
   function renderLobby() {
     var s = st, url = joinUrl();
     var qr = 'https://api.qrserver.com/v1/create-qr-code/?size=520x520&margin=0&data=' + encodeURIComponent(url + '/?code=' + s.code);
-    var people = s.players.length
-      ? s.players.map(function (p) { return '<button class="chip" data-id="' + p.id + '" title="Нажми, чтобы удалить">' + esc(p.name) + '</button>'; }).join('')
-      : '<span class="muted">Пока никого</span>';
     if (!document.getElementById('lobbyRoot')) {
       $view.innerHTML =
         '<div class="lobby" id="lobbyRoot">' +
@@ -170,27 +169,41 @@
             '<div class="code">' + esc(s.code) + '</div>' +
             '<img alt="QR-код для входа" src="' + qr + '">' +
           '</div>' +
-          '<div class="people"><h2 id="pplH"></h2><div class="chips" id="ppl"></div></div>' +
+          '<div class="people"><h2 id="pplH"></h2><div class="chips" id="ppl"></div><p class="muted" id="nobody">Пока никого</p></div>' +
         '</div>' +
         '<div class="actions"><button class="btn ghost" id="newBtn">Новая сессия</button><button class="btn" id="startBtn">Начать квиз</button></div>';
       document.getElementById('startBtn').onclick = function () { setPhase('question', 1); };
       document.getElementById('newBtn').onclick = function () { showLogin(); };
     }
-    document.getElementById('pplH').textContent = 'Подключились: ' + s.players.length;
-    document.getElementById('ppl').innerHTML = people;
-    document.getElementById('startBtn').disabled = s.players.length === 0;
-    Array.prototype.forEach.call(document.querySelectorAll('#ppl .chip'), function (c) {
-      c.onclick = function () {
-        rpc('quiz_host_kick', { p_session: host.session_id, p_token: host.host_token, p_player: c.getAttribute('data-id') }).then(poll);
-      };
+    // добавляем только новых участников, чтобы анимация появления не повторялась
+    var box = document.getElementById('ppl'), have = {}, now = {};
+    s.players.forEach(function (p) { now[p.id] = 1; });
+    Array.prototype.forEach.call(box.children, function (c) {
+      var id = c.getAttribute('data-id');
+      if (!now[id]) c.remove(); else have[id] = 1;
     });
+    s.players.forEach(function (p) {
+      if (have[p.id]) return;
+      var c = document.createElement('button');
+      c.className = 'chip pop';
+      c.setAttribute('data-id', p.id);
+      c.title = 'Нажми, чтобы удалить';
+      c.innerHTML = '<span class="cav">' + esc(p.avatar) + '</span>' + esc(p.name);
+      c.onclick = function () {
+        rpc('quiz_host_kick', { p_session: host.session_id, p_token: host.host_token, p_player: p.id }).then(poll);
+      };
+      box.appendChild(c);
+    });
+    document.getElementById('pplH').textContent = 'Подключились: ' + s.players.length;
+    document.getElementById('nobody').classList.toggle('hidden', s.players.length > 0);
+    document.getElementById('startBtn').disabled = s.players.length === 0;
   }
 
   function optionsHtml(reveal) {
     var s = st, q = s.question, total = s.answers.length;
     var counts = q.options.map(function () { return 0; });
     var names = q.options.map(function () { return []; });
-    s.answers.forEach(function (a) { counts[a.choice - 1]++; names[a.choice - 1].push(a.name); });
+    s.answers.forEach(function (a) { counts[a.choice - 1]++; names[a.choice - 1].push(a.avatar + ' ' + a.name); });
     return '<div class="hopts">' + q.options.map(function (o, i) {
       var cls = 'hopt c' + (i % 4 + 1);
       var extra = '';
@@ -222,32 +235,84 @@
   }
 
   function renderReveal() {
-    var s = st, last = s.q >= s.total;
-    var top = s.players.slice(0, 5).map(function (p, i) {
-      return '<li><span class="n">' + (i + 1) + '</span><span class="nm">' + esc(p.name) + '</span><span class="pt">' + fmt(p.score) + '</span></li>';
-    }).join('');
-    var noAns = s.players.length - s.answers.length;
+    var s = st;
+    var noAns = s.players.filter(function (p) { return !p.answered; });
     $view.innerHTML =
       '<div class="qwrap">' +
         '<h1 class="qtitle">' + esc(s.question.text) + '</h1>' +
-        '<div class="reveal-grid">' +
-          '<div>' + optionsHtml(true) +
-            (noAns > 0 ? '<p class="muted">Без ответа: ' + noAns + (showNames ? ' (' + s.players.filter(function (p) { return !p.answered; }).map(function (p) { return esc(p.name); }).join(', ') + ')' : '') + '</p>' : '') +
-          '</div>' +
-          '<div class="board"><h3>Промежуточный рейтинг</h3><ol>' + (top || '<li class="muted">Нет участников</li>') + '</ol></div>' +
-        '</div>' +
+        optionsHtml(true) +
+        (noAns.length ? '<p class="muted" style="margin:0">Без ответа: ' + noAns.length +
+          (showNames ? ' (' + noAns.map(function (p) { return esc(p.avatar + ' ' + p.name); }).join(', ') + ')' : '') + '</p>' : '') +
         '<div class="actions">' +
           '<button class="btn ghost" id="namesBtn">' + (showNames ? 'Скрыть имена' : 'Кто как ответил') + '</button>' +
-          '<button class="btn" id="nextBtn">' + (last ? 'Итоги →' : 'Следующий вопрос →') + '</button>' +
+          '<button class="btn" id="nextBtn">Рейтинг →</button>' +
         '</div>' +
       '</div>';
     document.getElementById('namesBtn').onclick = function () { showNames = !showNames; render(); };
+    document.getElementById('nextBtn').onclick = function () { boardShown = true; render(); };
+  }
+
+  // Рейтинг: строки стоят на прошлых местах, потом переезжают на новые
+  function renderBoard() {
+    var s = st, last = s.q >= s.total, gain = {};
+    s.answers.forEach(function (a) { gain[a.player_id] = a.points || 0; });
+    var cur = s.players;
+    var prev = cur.map(function (p) { return { id: p.id, name: p.name, score: p.score - (gain[p.id] || 0) }; })
+      .sort(function (a, b) { return b.score - a.score || a.name.localeCompare(b.name, 'ru'); });
+    var from = {};
+    prev.forEach(function (p, i) { from[p.id] = i; });
+    var visible = Math.min(cur.length, BOARD_MAX);
+    var rows = cur.map(function (p, i) {
+      var f = from[p.id], g = gain[p.id] || 0;
+      return '<div class="lb-row' + (f === 0 ? ' lead' : '') + '" data-from="' + f + '" data-to="' + i + '" data-s0="' + (p.score - g) + '" data-s1="' + p.score + '"' +
+        ' style="transform:translateY(' + f * ROW_H + 'px);z-index:' + (f > i ? 3 : 1) + '">' +
+        '<span class="rk">' + (f + 1) + '</span>' +
+        '<span class="lav">' + esc(p.avatar) + '</span>' +
+        '<span class="nm">' + esc(p.name) + '</span>' +
+        '<span class="mv"></span>' +
+        (g ? '<span class="gain">+' + fmt(g) + '</span>' : '') +
+        '<span class="sc">' + fmt(p.score - g) + '</span>' +
+      '</div>';
+    }).join('');
+    $view.innerHTML =
+      '<div class="qwrap">' +
+        '<h1 class="qtitle" style="text-align:center">' + (last ? 'Итоговый рейтинг' : 'Рейтинг после вопроса ' + s.q) + '</h1>' +
+        '<div class="lb" id="lb" style="height:' + Math.max(0, visible * ROW_H - 8) + 'px">' + rows + '</div>' +
+        (cur.length > BOARD_MAX ? '<p class="muted" style="text-align:center;margin:0">и ещё ' + (cur.length - BOARD_MAX) + '</p>' : '') +
+        '<div class="actions"><button class="btn" id="nextBtn">' + (last ? 'Итоги →' : 'Следующий вопрос →') + '</button></div>' +
+      '</div>';
     document.getElementById('nextBtn').onclick = function () { last ? setPhase('finished') : setPhase('question', s.q + 1); };
+
+    var myKey = viewKey;
+    setTimeout(function () {
+      if (viewKey !== myKey) return;
+      var els = Array.prototype.slice.call(document.querySelectorAll('#lb .lb-row'));
+      els.forEach(function (el) {
+        var f = +el.getAttribute('data-from'), t = +el.getAttribute('data-to');
+        el.style.transform = 'translateY(' + t * ROW_H + 'px)';
+        el.querySelector('.rk').textContent = t + 1;
+        var mv = el.querySelector('.mv');
+        if (f > t) { mv.textContent = '▲ ' + (f - t); mv.className = 'mv up'; }
+        else if (f < t) { mv.textContent = '▼ ' + (t - f); mv.className = 'mv down'; }
+        el.classList.toggle('lead', t === 0);
+        el.classList.add('go');
+      });
+      var t0 = performance.now(), dur = 1100;
+      (function step(now) {
+        var k = Math.min(1, (now - t0) / dur);
+        k = 1 - Math.pow(1 - k, 3);
+        els.forEach(function (el) {
+          var a = +el.getAttribute('data-s0'), b = +el.getAttribute('data-s1');
+          el.querySelector('.sc').textContent = fmt(Math.round(a + (b - a) * k));
+        });
+        if (k < 1 && viewKey === myKey) requestAnimationFrame(step);
+      })(t0);
+    }, 900);
   }
 
   function showBoard() {
     var rows = st.players.map(function (p, i) {
-      return '<li><span class="n">' + (i + 1) + '</span><span class="nm">' + esc(p.name) + '</span>' +
+      return '<li><span class="n">' + (i + 1) + '</span><span class="nm">' + esc(p.avatar + ' ' + p.name) + '</span>' +
         '<span class="muted">' + p.correct_count + ' верн.</span><span class="pt" style="min-width:70px;text-align:right">' + fmt(p.score) + '</span></li>';
     }).join('');
     $overlay.innerHTML = '<div class="board"><h3>Рейтинг' + (st.phase === 'question' ? ' (без текущего вопроса)' : '') + '</h3><ol>' + rows + '</ol>' +
@@ -270,13 +335,13 @@
     var p = s.players, m = matrix(), qs = full.questions;
     function pod(i, cls) {
       if (!p[i]) return '<div></div>';
-      return '<div class="pod ' + cls + '"><div class="pl">' + (i + 1) + ' место</div><div class="nm">' + esc(p[i].name) + '</div>' +
+      return '<div class="pod ' + cls + '"><div class="pav">' + esc(p[i].avatar) + '</div><div class="pl">' + (i + 1) + ' место</div><div class="nm">' + esc(p[i].name) + '</div>' +
         '<div class="pt">' + p[i].correct_count + ' из ' + s.total + ' · ' + fmt(p[i].score) + '</div></div>';
     }
     var head = '<tr><th>#</th><th class="nm">Имя</th><th>Верных</th><th>%</th><th>Баллы</th>' +
       qs.map(function (q) { return '<th title="' + esc(q.text) + '">' + q.idx + '</th>'; }).join('') + '</tr>';
     var body = p.map(function (pl, i) {
-      return '<tr><td>' + (i + 1) + '</td><td class="nm">' + esc(pl.name) + '</td><td><b>' + pl.correct_count + '</b></td>' +
+      return '<tr><td>' + (i + 1) + '</td><td class="nm">' + esc(pl.avatar + ' ' + pl.name) + '</td><td><b>' + pl.correct_count + '</b></td>' +
         '<td>' + Math.round(100 * pl.correct_count / s.total) + '</td><td>' + fmt(pl.score) + '</td>' +
         qs.map(function (q) {
           var a = m[pl.id + ':' + q.idx];

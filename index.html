@@ -22,6 +22,7 @@
   var cfg = window.QUIZ_CONFIG;
   var sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY, { auth: { persistSession: false } });
   var LETTERS = ['А', 'Б', 'В', 'Г', 'Д', 'Е'];
+  var AVATARS = ['🦊','🐼','🐨','🐯','🦁','🐸','🐵','🐧','🐙','🦄','🐲','🦉','🐺','🐻','🐰','🐱','🐶','🐹','🐮','🐷','🦋','🐢','🐬','🦖','🐝','🦒','🦔','🐳','🦩','🦥','🤖','👽','👻','🧙','🧚','🦸'];
   var STORE = 'quiz_player_v1';
   var ERR = {
     NO_SESSION: 'Квиз с таким кодом не найден',
@@ -69,14 +70,27 @@
       '<input class="field" id="code" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="123456" value="' + esc(code) + '"></div>' +
       '<div><label class="lbl" for="name">Имя и фамилия</label>' +
       '<input class="field" id="name" autocomplete="name" maxlength="40" placeholder="Айгерим Сапарова"></div>' +
+      '<div><label class="lbl">Аватарка</label><div class="avgrid" id="avs">' +
+        AVATARS.map(function (a) { return '<button type="button" class="av" data-a="' + a + '">' + a + '</button>'; }).join('') +
+      '</div></div>' +
       '<button class="btn" id="go">Войти</button>' +
       '<div class="err" id="err">' + esc(msg || '') + '</div>';
     var $code = document.getElementById('code'), $name = document.getElementById('name'), $go = document.getElementById('go');
     (code ? $name : $code).focus();
+    var avatar = AVATARS[Math.floor(Math.random() * AVATARS.length)];
+    function markAv() {
+      Array.prototype.forEach.call(document.querySelectorAll('#avs .av'), function (b) {
+        b.classList.toggle('on', b.getAttribute('data-a') === avatar);
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('#avs .av'), function (b) {
+      b.onclick = function () { avatar = b.getAttribute('data-a'); markAv(); };
+    });
+    markAv();
     function submit() {
       $go.disabled = true;
       document.getElementById('err').textContent = '';
-      rpc('quiz_join', { p_code: $code.value.replace(/\D/g, ''), p_name: $name.value })
+      rpc('quiz_join', { p_code: $code.value.replace(/\D/g, ''), p_name: $name.value, p_avatar: avatar })
         .then(function (d) { me = d; save(d); poll(); })
         .catch(function (e) { $go.disabled = false; document.getElementById('err').textContent = errText(e); });
     }
@@ -112,7 +126,7 @@
   // ---------- экраны ----------
   function render() {
     var s = state;
-    $left.textContent = s.name;
+    $left.textContent = (s.avatar ? s.avatar + ' ' : '') + s.name;
     $right.textContent = s.q > 0 ? 'Вопрос ' + s.q + ' / ' + s.total : '';
     var answered = s.my_choice != null || pending != null;
     var key = s.phase + ':' + s.q + ':' + (answered ? 'a' : '-');
@@ -122,7 +136,7 @@
 
     if (s.phase === 'lobby') {
       $view.innerHTML =
-        '<div class="pulse"></div>' +
+        '<div class="me-av">' + esc(s.avatar) + '</div>' +
         '<h1>Ты в игре</h1>' +
         '<p class="muted">Смотри на экран. Квиз скоро начнётся</p>';
     } else if (s.phase === 'question') {
