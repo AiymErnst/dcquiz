@@ -42,7 +42,8 @@
   var boardShown = false; // после ответа: экран рейтинга
   var ROW_H = 64, BOARD_MAX = 10;
   var pollTimer = null;
-  var gen = 0;           // меняется при выходе к экрану входа, чтобы старые ответы сервера не перерисовали экран
+  var gen = 0;
+  var copiedUntil = 0;   // чтобы надпись «Скопировано» не пропадала при обновлении панели           // меняется при выходе к экрану входа, чтобы старые ответы сервера не перерисовали экран
 
   function load() { try { return JSON.parse(localStorage.getItem(STORE)); } catch (e) { return null; } }
   function save(v) { try { v ? localStorage.setItem(STORE, JSON.stringify(v)) : localStorage.removeItem(STORE); } catch (e) {} }
@@ -50,6 +51,26 @@
   function fmt(n) { return Number(n || 0).toLocaleString('ru-RU'); }
   function rpc(fn, args) { return sb.rpc(fn, args).then(function (r) { if (r.error) throw r.error; return r.data; }); }
   function joinUrl() { return new URL('./', location.href).href.replace(/\/$/, ''); }
+  // ссылка для студентов: сразу открывает форму участника с подставленным кодом
+  function studentLink() { return joinUrl() + '/?code=' + (st ? st.code : ''); }
+  function copyLink(btn) {
+    var url = studentLink(), label = btn.id === 'topLink' ? 'Ссылка для входа' : 'Скопировать ссылку';
+    function done() {
+      copiedUntil = performance.now() + 1800;
+      btn.textContent = 'Скопировано ✓';
+      setTimeout(function () { btn.textContent = label; }, 1800);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(done, fallback);
+    } else fallback();
+    function fallback() {
+      var t = document.createElement('textarea');
+      t.value = url; t.style.position = 'fixed'; t.style.opacity = '0';
+      document.body.appendChild(t); t.select();
+      try { document.execCommand('copy'); done(); } catch (e) { prompt('Ссылка для студентов:', url); }
+      t.remove();
+    }
+  }
 
   // ---------- вход ведущего ----------
   function showLogin(msg) {
@@ -142,6 +163,7 @@
     $top.innerHTML =
       '<span class="pill">Код <b>' + esc(s.code) + '</b></span>' +
       (s.q > 0 && s.phase !== 'finished' ? '<span class="pill">Вопрос <b>' + s.q + ' / ' + s.total + '</b></span>' : '') +
+      (s.phase !== 'lobby' && s.phase !== 'finished' ? '<button class="btn ghost small" id="topLink">' + (performance.now() < copiedUntil ? 'Скопировано ✓' : 'Ссылка для входа') + '</button>' : '') +
       '<span class="sp"></span>' +
       (s.phase === 'question' ? '<span class="pill">Ответили <b id="ansN">' + answeredN + ' / ' + s.players.length + '</b></span>' : '') +
       '<span class="pill">Участников <b>' + s.players.length + '</b></span>' +
@@ -149,6 +171,8 @@
       (s.phase !== 'lobby' ? '<button class="btn ghost small" id="restartBtn">Начать заново</button>' : '');
     var b = document.getElementById('boardBtn');
     if (b) b.onclick = showBoard;
+    var tl = document.getElementById('topLink');
+    if (tl) tl.onclick = function () { copyLink(tl); };
     var r = document.getElementById('restartBtn');
     if (r) r.onclick = askRestart;
 
@@ -173,11 +197,14 @@
             '<div class="url">Зайди на <b>' + esc(url.replace(/^https?:\/\//, '')) + '</b> и введи код</div>' +
             '<div class="code">' + esc(s.code) + '</div>' +
             '<img alt="QR-код для входа" src="' + qr + '">' +
+            '<div class="sharelink"><span id="studentLink">' + esc(studentLink().replace(/^https?:\/\//, '')) + '</span>' +
+              '<button class="btn small" id="copyLink">Скопировать ссылку</button></div>' +
           '</div>' +
           '<div class="people"><h2 id="pplH"></h2><div class="chips" id="ppl"></div><p class="muted" id="nobody">Пока никого</p></div>' +
         '</div>' +
         '<div class="actions"><button class="btn ghost" id="newBtn">Новая сессия</button><button class="btn" id="startBtn">Начать квиз</button></div>';
       document.getElementById('startBtn').onclick = function () { setPhase('question', 1); };
+      document.getElementById('copyLink').onclick = function () { copyLink(this); };
       document.getElementById('newBtn').onclick = function () { showLogin(); };
     }
     // добавляем только новых участников, чтобы анимация появления не повторялась
