@@ -145,9 +145,12 @@
       '<span class="sp"></span>' +
       (s.phase === 'question' ? '<span class="pill">Ответили <b id="ansN">' + answeredN + ' / ' + s.players.length + '</b></span>' : '') +
       '<span class="pill">Участников <b>' + s.players.length + '</b></span>' +
-      (s.phase !== 'lobby' && s.phase !== 'finished' ? '<button class="btn ghost small" id="boardBtn">Весь рейтинг</button>' : '');
+      (s.phase !== 'lobby' && s.phase !== 'finished' ? '<button class="btn ghost small" id="boardBtn">Весь рейтинг</button>' : '') +
+      (s.phase !== 'lobby' ? '<button class="btn ghost small" id="restartBtn">Начать заново</button>' : '');
     var b = document.getElementById('boardBtn');
     if (b) b.onclick = showBoard;
+    var r = document.getElementById('restartBtn');
+    if (r) r.onclick = askRestart;
 
     var key = s.phase + ':' + s.q + ':' + (showNames ? 'n' : '') + ':' + (boardShown ? 'b' : '') + ':' + (full ? 'f' : '');
     // в лобби и во время вопроса обновляем экран при каждом опросе (новые участники, счётчики)
@@ -319,6 +322,29 @@
     }, 900);
   }
 
+  function askRestart() {
+    $overlay.innerHTML = '<div class="board"><h3>Начать квиз заново?</h3>' +
+      '<p style="margin:0 0 6px">Все ответы и очки обнулятся. Участники останутся подключены и вернутся в лобби.</p>' +
+      '<div class="actions" style="margin-top:16px"><button class="btn ghost small" id="noRestart">Отмена</button>' +
+      '<button class="btn small" id="yesRestart">Начать заново</button></div></div>';
+    $overlay.classList.remove('hidden');
+    document.getElementById('noRestart').onclick = function () { $overlay.classList.add('hidden'); };
+    $overlay.onclick = function (e) { if (e.target === $overlay) $overlay.classList.add('hidden'); };
+    document.getElementById('yesRestart').onclick = function () {
+      var btn = document.getElementById('yesRestart');
+      btn.disabled = true;
+      busy = true;
+      rpc('quiz_host_restart', { p_session: host.session_id, p_token: host.host_token })
+        .then(function () {
+          busy = false; full = null; showNames = false; boardShown = false; viewKey = '';
+          if (st) st.phase = 'lobby'; // чтобы таймер старого вопроса не сработал до ответа сервера
+          $overlay.classList.add('hidden');
+          poll();
+        })
+        .catch(function () { busy = false; btn.disabled = false; });
+    };
+  }
+
   function showBoard() {
     var rows = st.players.map(function (p, i) {
       return '<li><span class="n">' + (i + 1) + '</span><span class="nm">' + esc(p.avatar + ' ' + p.name) + '</span>' +
@@ -410,6 +436,7 @@
   document.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key !== ' ' && e.key !== 'Enter') return;
+    if (!$overlay.classList.contains('hidden')) return; // открыто окно — пробел не листает квиз
     var btn = document.getElementById('nextBtn') || document.getElementById('revealBtn') || document.getElementById('startBtn');
     if (btn && !btn.disabled) { e.preventDefault(); btn.click(); }
   });
